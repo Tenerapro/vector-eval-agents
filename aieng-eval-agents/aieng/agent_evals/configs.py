@@ -4,6 +4,7 @@ This module provides centralized configuration management using Pydantic setting
 supporting environment variables and .env file loading.
 """
 
+from typing import Literal
 from typing import Any
 
 from pydantic import AliasChoices, BaseModel, Field, SecretStr, field_validator
@@ -55,6 +56,50 @@ class DatabaseConfig(BaseModel):
         ).render_as_string(hide_password=False)
 
 
+class TeneraRetrievalConfig(BaseModel):
+    """Configuration for Tenera Knowledge Bot retrieval backends."""
+
+    backend: Literal["sqlite", "postgres", "http"] = Field(
+        default="sqlite",
+        description="Active retrieval backend.",
+    )
+    kb_path: str | None = Field(
+        default=None,
+        description="Path to the local SQLite knowledge-base file when using the sqlite backend.",
+    )
+    db: DatabaseConfig | None = Field(
+        default=None,
+        description="Database configuration for the postgres retrieval backend.",
+    )
+    http_base_url: str | None = Field(
+        default=None,
+        description="Base URL for a remote retrieval service when using the http backend.",
+    )
+    http_api_key: SecretStr | None = Field(
+        default=None,
+        description="Optional API key for the remote retrieval service.",
+    )
+    embedding_model: str = Field(
+        default="gemini-embedding-001",
+        description="Embedding model name used by vector retrieval/indexing.",
+    )
+    embedding_base_url: str | None = Field(
+        default=None,
+        description="OpenAI-compatible embedding base URL override.",
+    )
+    embedding_api_key: SecretStr | None = Field(
+        default=None,
+        description="OpenAI-compatible embedding API key override.",
+    )
+    top_k: int = Field(default=10, ge=1, description="Default top-k retrieval count.")
+    fusion_mode: Literal["rrf", "weighted"] = Field(
+        default="rrf",
+        description="Hybrid fusion strategy.",
+    )
+    lexical_weight: float = Field(default=0.4, ge=0.0, le=1.0, description="Weight for lexical scores.")
+    vector_weight: float = Field(default=0.6, ge=0.0, le=1.0, description="Weight for vector scores.")
+
+
 class Configs(BaseSettings):
     """Central configuration for all agent evaluations.
 
@@ -90,6 +135,11 @@ class Configs(BaseSettings):
     tenera_knowledge_bot_db: DatabaseConfig | None = Field(
         default=None,
         description="Database configuration for the Tenera Knowledge Bot.",
+    )
+
+    tenera_retrieval: TeneraRetrievalConfig | None = Field(
+        default=None,
+        description="Retrieval backend configuration for the Tenera Knowledge Bot.",
     )
 
     # === Core LLM Settings ===
