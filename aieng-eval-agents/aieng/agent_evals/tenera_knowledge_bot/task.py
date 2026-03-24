@@ -1,12 +1,13 @@
 """Langfuse task wrapper for the Tenera Knowledge Bot."""
 
+from __future__ import annotations
+
 import getpass
 import json
 import logging
 import uuid
 from typing import Any
 
-from aieng.agent_evals.db_manager import DbManager
 from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
@@ -62,4 +63,3 @@ class TeneraKnowledgeBotTask:
     async def close(self) -> None:
         """Close runner and DB resources."""
         await self._runner.close()
-        DbManager.get_instance().tenera_knowledge_bot_db().close()
