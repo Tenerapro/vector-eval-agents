@@ -41,6 +41,7 @@ class DbManager:
         self._configs: Configs | None = configs
         self._aml_db: ReadOnlySqlDatabase | None = None
         self._report_generation_db: ReadOnlySqlDatabase | None = None
+        self._tenera_knowledge_bot_db: ReadOnlySqlDatabase | None = None
 
     @property
     def configs(self) -> Configs:
@@ -126,6 +127,36 @@ class DbManager:
 
         return self._report_generation_db
 
+    def tenera_knowledge_bot_db(self, agent_name: str = "TeneraKnowledgeBot") -> ReadOnlySqlDatabase:
+        """Get or create the Tenera Knowledge Bot database connection.
+
+        Parameters
+        ----------
+        agent_name : str, optional
+            Name of the agent using this connection,
+            by default ``"TeneraKnowledgeBot"``.
+
+        Returns
+        -------
+        ReadOnlySqlDatabase
+            The Tenera Knowledge Bot database connection instance.
+
+        Raises
+        ------
+        ValueError
+            If Tenera Knowledge Bot database configuration is missing.
+        """
+        if self._tenera_knowledge_bot_db is None:
+            if self.configs.tenera_knowledge_bot_db is None:
+                raise ValueError("Tenera Knowledge Bot database configuration is missing.")
+
+            self._tenera_knowledge_bot_db = ReadOnlySqlDatabase(
+                connection_uri=self.configs.tenera_knowledge_bot_db.build_uri(),
+                agent_name=agent_name,
+            )
+
+        return self._tenera_knowledge_bot_db
+
     def close(self) -> None:
         """Dispose of all database connections."""
         if self._aml_db is not None:
@@ -135,3 +166,7 @@ class DbManager:
         if self._report_generation_db is not None:
             self._report_generation_db.close()
             self._report_generation_db = None
+
+        if self._tenera_knowledge_bot_db is not None:
+            self._tenera_knowledge_bot_db.close()
+            self._tenera_knowledge_bot_db = None

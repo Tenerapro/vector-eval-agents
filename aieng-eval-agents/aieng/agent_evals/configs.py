@@ -87,6 +87,11 @@ class Configs(BaseSettings):
         description="Database configuration for the the Report Generation Agent.",
     )
 
+    tenera_knowledge_bot_db: DatabaseConfig | None = Field(
+        default=None,
+        description="Database configuration for the Tenera Knowledge Bot.",
+    )
+
     # === Core LLM Settings ===
     openai_base_url: str = Field(
         default="https://generativelanguage.googleapis.com/v1beta/openai/",
