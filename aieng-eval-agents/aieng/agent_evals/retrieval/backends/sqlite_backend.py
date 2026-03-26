@@ -6,6 +6,9 @@ import json
 import math
 import re
 import sqlite3
+import threading
+from functools import lru_cache
+from heapq import nlargest
 from pathlib import Path
 
 import httpx
@@ -83,40 +86,104 @@ def _candidate_models(model: str, base_url: str) -> list[str]:
     return [model]
 
 
+def _connect_read_only(kb_path: str) -> sqlite3.Connection:
+    """Open a read-only SQLite connection tuned for concurrent retrieval."""
+    resolved = Path(kb_path).resolve()
+    connection = sqlite3.connect(
+        f"file:{resolved}?mode=ro",
+        uri=True,
+    )
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only = ON")
+    connection.execute("PRAGMA busy_timeout = 5000")
+    return connection
+
+
+def _cache_key_for_db(kb_path: str) -> tuple[str, int, int]:
+    path = Path(kb_path).resolve()
+    stat = path.stat()
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=8)
+def _load_embedding_rows(cache_key: tuple[str, int, int]) -> tuple[tuple[RetrievalResult, list[float]], ...]:
+    """Load and parse all stored chunk embeddings once per DB version."""
+    kb_path, _, _ = cache_key
+    with _connect_read_only(kb_path) as connection:
+        rows = connection.execute(
+            """
+            SELECT
+                c.chunk_id,
+                c.section_id,
+                c.chapter,
+                c.section_label,
+                c.title,
+                c.source_file,
+                c.chunk_index,
+                c.text,
+                e.embedding_json
+            FROM chunk_embeddings e
+            JOIN chunks c ON c.chunk_id = e.chunk_id
+            """
+        ).fetchall()
+
+    return tuple(
+        (
+            RetrievalResult(
+                chunk_id=row["chunk_id"],
+                text=row["text"],
+                score=0.0,
+                metadata=ChunkCitation(
+                    section_id=row["section_id"],
+                    chapter=row["chapter"],
+                    section_label=row["section_label"],
+                    title=row["title"],
+                    source_file=row["source_file"],
+                    chunk_index=int(row["chunk_index"]),
+                ),
+                retrieval_method="vector",
+            ),
+            list(json.loads(row["embedding_json"])),
+        )
+        for row in rows
+    )
+
+
 class SqliteChunkStore(ChunkStore):
     """Chunk-store access backed by SQLite."""
 
     def __init__(self, kb_path: str) -> None:
         self._kb_path = kb_path
+        self._local = threading.local()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._kb_path)
-        connection.row_factory = sqlite3.Row
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = _connect_read_only(self._kb_path)
+            self._local.connection = connection
         return connection
 
     def get_chunk(self, chunk_id: str) -> RetrievalResult | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT chunk_id, section_id, chapter, section_label, title, source_file, chunk_index, text, 1.0 AS score
-                FROM chunks
-                WHERE chunk_id = ?
-                """,
-                (chunk_id,),
-            ).fetchone()
+        row = self._connect().execute(
+            """
+            SELECT chunk_id, section_id, chapter, section_label, title, source_file, chunk_index, text, 1.0 AS score
+            FROM chunks
+            WHERE chunk_id = ?
+            """,
+            (chunk_id,),
+        ).fetchone()
         return _row_to_result(row, "hybrid") if row else None
 
     def get_section_chunks(self, section_id: str) -> list[RetrievalResult]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT chunk_id, section_id, chapter, section_label, title, source_file, chunk_index, text, 1.0 AS score
-                FROM chunks
-                WHERE section_id = ?
-                ORDER BY chunk_index ASC
-                """,
-                (section_id,),
-            ).fetchall()
+        rows = self._connect().execute(
+            """
+            SELECT chunk_id, section_id, chapter, section_label, title, source_file, chunk_index, text, 1.0 AS score
+            FROM chunks
+            WHERE section_id = ?
+            ORDER BY chunk_index ASC
+            """,
+            (section_id,),
+        ).fetchall()
         return [_row_to_result(row, "hybrid") for row in rows]
 
 
@@ -125,6 +192,14 @@ class SqliteFtsLexicalRetriever(LexicalRetriever):
 
     def __init__(self, kb_path: str) -> None:
         self._kb_path = kb_path
+        self._local = threading.local()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = _connect_read_only(self._kb_path)
+            self._local.connection = connection
+        return connection
 
     def search(
         self,
@@ -135,36 +210,32 @@ class SqliteFtsLexicalRetriever(LexicalRetriever):
     ) -> list[RetrievalResult]:
         filter_sql, filter_params = _apply_filters_sql(filters)
         safe_query = _escape_fts_query(query)
-        connection = sqlite3.connect(self._kb_path)
-        connection.row_factory = sqlite3.Row
+        connection = self._connect()
+        sql = f"""
+            SELECT
+                c.chunk_id,
+                c.section_id,
+                c.chapter,
+                c.section_label,
+                c.title,
+                c.source_file,
+                c.chunk_index,
+                c.text,
+                -bm25(chunks_fts) AS score
+            FROM chunks_fts
+            JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
+            WHERE chunks_fts MATCH ?
+            {filter_sql}
+            ORDER BY bm25(chunks_fts)
+            LIMIT ?
+        """
         try:
-            sql = f"""
-                SELECT
-                    c.chunk_id,
-                    c.section_id,
-                    c.chapter,
-                    c.section_label,
-                    c.title,
-                    c.source_file,
-                    c.chunk_index,
-                    c.text,
-                    -bm25(chunks_fts) AS score
-                FROM chunks_fts
-                JOIN chunks c ON c.chunk_id = chunks_fts.chunk_id
-                WHERE chunks_fts MATCH ?
-                {filter_sql}
-                ORDER BY bm25(chunks_fts)
-                LIMIT ?
-            """
-            try:
-                rows = connection.execute(sql, [safe_query, *filter_params, top_k]).fetchall()
-            except sqlite3.OperationalError:
-                # Fall back to a looser OR query if the stricter tokenized search
-                # still hits an FTS parsing edge case.
-                fallback_query = " OR ".join(part for part in safe_query.split() if part)
-                rows = connection.execute(sql, [fallback_query, *filter_params, top_k]).fetchall()
-        finally:
-            connection.close()
+            rows = connection.execute(sql, [safe_query, *filter_params, top_k]).fetchall()
+        except sqlite3.OperationalError:
+            # Fall back to a looser OR query if the stricter tokenized search
+            # still hits an FTS parsing edge case.
+            fallback_query = " OR ".join(part for part in safe_query.split() if part)
+            rows = connection.execute(sql, [fallback_query, *filter_params, top_k]).fetchall()
         return [_row_to_result(row, "lexical") for row in rows]
 
 
@@ -175,6 +246,7 @@ class SqliteVectorRetriever(VectorRetriever):
         self._kb_path = kb_path
         self._settings = settings
         self._configs = Configs()  # type: ignore[call-arg]
+        self._embedding_rows = _load_embedding_rows(_cache_key_for_db(kb_path))
 
     def _embed_query(self, query: str) -> list[float]:
         api_key = (
@@ -207,11 +279,6 @@ class SqliteVectorRetriever(VectorRetriever):
         assert last_error is not None
         raise last_error
 
-    def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self._kb_path)
-        connection.row_factory = sqlite3.Row
-        return connection
-
     def search(
         self,
         query: str,
@@ -220,50 +287,21 @@ class SqliteVectorRetriever(VectorRetriever):
         filters: RetrievalFilters | None = None,
     ) -> list[RetrievalResult]:
         query_embedding = self._embed_query(query)
-        filter_sql, filter_params = _apply_filters_sql(filters)
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"""
-                SELECT
-                    c.chunk_id,
-                    c.section_id,
-                    c.chapter,
-                    c.section_label,
-                    c.title,
-                    c.source_file,
-                    c.chunk_index,
-                    c.text,
-                    e.embedding_json
-                FROM chunk_embeddings e
-                JOIN chunks c ON c.chunk_id = e.chunk_id
-                WHERE 1 = 1
-                {filter_sql}
-                """,
-                filter_params,
-            ).fetchall()
-
-        scored_results: list[RetrievalResult] = []
-        for row in rows:
-            similarity = _cosine_similarity(query_embedding, json.loads(row["embedding_json"]))
-            scored_results.append(
-                RetrievalResult(
-                    chunk_id=row["chunk_id"],
-                    text=row["text"],
-                    score=similarity,
-                    metadata=ChunkCitation(
-                        section_id=row["section_id"],
-                        chapter=row["chapter"],
-                        section_label=row["section_label"],
-                        title=row["title"],
-                        source_file=row["source_file"],
-                        chunk_index=int(row["chunk_index"]),
-                    ),
-                    retrieval_method="vector",
-                )
+        candidate_rows = self._embedding_rows
+        if filters and filters.chapter:
+            candidate_rows = tuple(
+                item for item in candidate_rows if item[0].metadata.chapter == filters.chapter
+            )
+        if filters and filters.section_label:
+            candidate_rows = tuple(
+                item for item in candidate_rows if item[0].metadata.section_label == filters.section_label
             )
 
-        scored_results.sort(key=lambda item: item.score, reverse=True)
-        return scored_results[:top_k]
+        scored_results = [
+            result.model_copy(update={"score": _cosine_similarity(query_embedding, embedding)})
+            for result, embedding in candidate_rows
+        ]
+        return nlargest(top_k, scored_results, key=lambda item: item.score)
 
 
 class SqliteRetrieverBackend:

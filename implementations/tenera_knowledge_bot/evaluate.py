@@ -87,7 +87,7 @@ def deterministic_retrieval_evaluator(
 @click.option("--dataset-name", default=DEFAULT_DATASET_NAME, help="Name of the Langfuse dataset to evaluate.")
 @click.option("--experiment-name", default=DEFAULT_EXPERIMENT_NAME, help="Name for this evaluation run.")
 @click.option("--agent-timeout", default=180, type=int, help="Timeout in seconds for each bot run.")
-@click.option("--max-concurrency", default=1, type=int, help="Maximum concurrent agent runs.")
+@click.option("--max-concurrency", default=5, type=int, help="Maximum concurrent agent runs.")
 @click.option("--max-trace-wait-time", default=300, type=int, help="Maximum time to wait for Langfuse traces.")
 @click.option(
     "--retrieval-backend",
