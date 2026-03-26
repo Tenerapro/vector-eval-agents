@@ -1,19 +1,24 @@
-"""Run a few Tenera Knowledge Bot questions locally without Langfuse evaluation."""
+"""Run a few Tenera Knowledge Bot questions locally with optional Langfuse tracing."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
-from typing import Any
 
 import click
 from aieng.agent_evals.configs import Configs, TeneraRetrievalConfig
-from aieng.agent_evals.tenera_knowledge_bot import TeneraKnowledgeBotTask, create_tenera_knowledge_bot_agent
+from aieng.agent_evals.evaluation.trace import flush_traces
+from aieng.agent_evals.langfuse import init_tracing
+from aieng.agent_evals.logging_config import setup_logging
+from aieng.agent_evals.tenera_knowledge_bot import BotResponse, TeneraKnowledgeBot
 from dotenv import load_dotenv
 
 
 load_dotenv(verbose=True)
+setup_logging(level=logging.INFO, show_time=True, show_path=False)
+logger = logging.getLogger(__name__)
 
 
 def _build_retrieval_config(backend: str | None) -> TeneraRetrievalConfig | None:
@@ -39,28 +44,42 @@ def _load_questions(question_values: tuple[str, ...], questions_file: str | None
     return questions
 
 
-def _print_result(question: str, result: dict[str, Any]) -> None:
+def _print_result(question: str, response: BotResponse) -> None:
     click.echo()
     click.echo("=" * 80)
     click.echo(f"Question: {question}")
     click.echo("-" * 80)
-    click.echo(f"Answer: {result.get('answer', '')}")
 
-    citations = result.get("citations", [])
-    if citations:
+    if response.tool_calls:
+        click.echo(f"\nTool calls ({len(response.tool_calls)}):")
+        for tc in response.tool_calls:
+            args_str = str(tc.get("args", {}))
+            if len(args_str) > 120:
+                args_str = args_str[:120] + "..."
+            click.echo(f"  - {tc.get('name', 'unknown')}({args_str})")
+
+    click.echo(f"\nAnswer: {response.answer}")
+
+    if response.citations:
         click.echo("\nCitations:")
-        for citation in citations:
-            click.echo(
-                f"- [{citation.get('chapter')}] {citation.get('section_label')} "
-                f"{citation.get('title')} ({citation.get('chunk_id')})"
-            )
-            click.echo(f"  Excerpt: {citation.get('excerpt')}")
+        for c in response.citations:
+            click.echo(f"  - [{c.chapter}] {c.section_label} {c.title} ({c.chunk_id})")
+            excerpt = c.excerpt
+            if len(excerpt) > 120:
+                excerpt = excerpt[:120] + "..."
+            click.echo(f"    Excerpt: {excerpt}")
 
-    caveats = result.get("caveats", [])
-    if caveats:
+    if response.caveats:
         click.echo("\nCaveats:")
-        for caveat in caveats:
-            click.echo(f"- {caveat}")
+        for caveat in response.caveats:
+            click.echo(f"  - {caveat}")
+
+    usage = response.token_usage
+    click.echo(
+        f"\nDuration: {response.total_duration_ms}ms | "
+        f"Tool calls: {len(response.tool_calls)} | "
+        f"Tokens: {usage.total_tokens} (prompt {usage.total_prompt_tokens}, completion {usage.total_completion_tokens})"
+    )
 
 
 async def _run_questions(
@@ -69,14 +88,19 @@ async def _run_questions(
     output_path: str | None,
     retrieval_backend: str | None,
     agent_timeout: int,
+    log_trace: bool,
 ) -> None:
+    tracing_enabled = False
+    if log_trace:
+        tracing_enabled = init_tracing()
+        if tracing_enabled:
+            logger.info("Langfuse tracing enabled")
+
     retrieval_config = _build_retrieval_config(retrieval_backend)
-    agent = create_tenera_knowledge_bot_agent(
-        timeout_sec=agent_timeout,
+    bot = TeneraKnowledgeBot(
         retrieval_config=retrieval_config,
-        enable_tracing=False,
+        timeout_sec=agent_timeout,
     )
-    task = TeneraKnowledgeBotTask(agent=agent)
 
     output_file = Path(output_path) if output_path else None
     if output_file:
@@ -84,23 +108,24 @@ async def _run_questions(
 
     try:
         for index, question in enumerate(questions, start=1):
-            item = {
-                "input": question,
-                "metadata": {"id": f"local-{index}"},
-            }
-            result = await task(item=item)
-            if result is None:
+            bot.reset()
+            response = await bot.answer_async(question)
+
+            if not response.text:
                 click.echo(f"\nQuestion {index} produced no result.")
                 continue
 
-            _print_result(question, result)
+            _print_result(question, response)
 
             if output_file:
-                record = {"question": question, "result": result}
+                record = {"question": question, "result": response.model_dump(mode="json")}
                 with output_file.open("a", encoding="utf-8") as handle:
                     handle.write(json.dumps(record, ensure_ascii=False) + "\n")
     finally:
-        await task.close()
+        await bot.close()
+        if tracing_enabled:
+            flush_traces()
+            logger.info("Traces flushed to Langfuse")
 
 
 @click.command()
@@ -132,12 +157,19 @@ async def _run_questions(
     type=int,
     help="Timeout in seconds for each local run.",
 )
+@click.option(
+    "--log-trace",
+    is_flag=True,
+    default=False,
+    help="Enable Langfuse tracing for this run.",
+)
 def cli(
     questions: tuple[str, ...],
     questions_file: str | None,
     output_path: str | None,
     retrieval_backend: str | None,
     agent_timeout: int,
+    log_trace: bool,
 ) -> None:
     """Run a few local questions against the Tenera Knowledge Bot."""
     loaded_questions = _load_questions(questions, questions_file)
@@ -150,6 +182,7 @@ def cli(
             output_path=output_path,
             retrieval_backend=retrieval_backend,
             agent_timeout=agent_timeout,
+            log_trace=log_trace,
         )
     )
 

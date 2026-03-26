@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from google.adk.tools.function_tool import FunctionTool
+
 from .hybrid import HybridRetriever
 from .types import ChunkStore, RetrievalFilters, RetrievalResult
 
@@ -19,8 +21,13 @@ def _format_result(result: RetrievalResult) -> str:
     )
 
 
-def make_retrieval_tools(retriever: HybridRetriever, store: ChunkStore) -> list:
-    """Build tool functions closed over a concrete retrieval stack."""
+def make_retrieval_tools(retriever: HybridRetriever, store: ChunkStore) -> list[FunctionTool]:
+    """Build ADK FunctionTools closed over a concrete retrieval stack.
+
+    Wrapping the retrieval helpers in ``FunctionTool`` keeps their behavior
+    identical for the agent, while ensuring ADK/OpenInference can recognize
+    them as first-class tool invocations for tracing.
+    """
 
     def search_knowledge_base(query: str, top_k: int = 10, chapter_filter: str | None = None) -> str:
         filters = RetrievalFilters(chapter=chapter_filter)
@@ -41,4 +48,8 @@ def make_retrieval_tools(retriever: HybridRetriever, store: ChunkStore) -> list:
             return f"Section '{section_id}' was not found."
         return "\n\n".join(_format_result(result) for result in results)
 
-    return [search_knowledge_base, get_chunk_by_id, get_section_context]
+    return [
+        FunctionTool(func=search_knowledge_base),
+        FunctionTool(func=get_chunk_by_id),
+        FunctionTool(func=get_section_context),
+    ]

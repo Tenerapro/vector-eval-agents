@@ -152,6 +152,7 @@ def init_tracing(service_name: str = "aieng-eval-agents") -> bool:
 
         GoogleADKInstrumentor().instrument(tracer_provider=provider)
 
+        manager.otel_tracer_provider = provider
         manager.otel_instrumented = True
         logger.info("Langfuse tracing initialized successfully (endpoint: %s)", otel_endpoint)
         return True

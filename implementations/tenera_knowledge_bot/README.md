@@ -48,6 +48,14 @@ uv run --env-file .env python -m implementations.tenera_knowledge_bot.ingestion.
 uv run --env-file .env python -m implementations.tenera_knowledge_bot.data.langfuse_upload
 ```
 
+To upload only the first 10 rows under a new dataset name:
+
+```bash
+uv run --env-file .env python -m implementations.tenera_knowledge_bot.data.langfuse_upload \
+  --dataset-name TeneraKnowledgeBotEval_first10 \
+  --limit 10
+```
+
 2. Run the evaluation:
 
 ```bash

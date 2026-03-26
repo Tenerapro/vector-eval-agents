@@ -4,7 +4,13 @@ Provides idempotent initialization and proper cleanup of async clients
 like OpenAI to prevent event loop conflicts during Gradio's hot-reload process.
 """
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from opentelemetry.sdk.trace import TracerProvider
 
 from aieng.agent_evals.configs import Configs
 from langfuse import Langfuse
@@ -64,6 +70,7 @@ class AsyncClientManager:
         self._openai_client: AsyncOpenAI | None = None
         self._langfuse_client: Langfuse | None = None
         self._otel_instrumented: bool = False
+        self._otel_tracer_provider: "TracerProvider | None" = None
         self._initialized: bool = False
 
     @property
@@ -141,6 +148,15 @@ class AsyncClientManager:
         """
         self._otel_instrumented = value
 
+    @property
+    def otel_tracer_provider(self) -> "TracerProvider | None":
+        """The OTEL TracerProvider created by ``init_tracing``, if any."""
+        return self._otel_tracer_provider
+
+    @otel_tracer_provider.setter
+    def otel_tracer_provider(self, value: "TracerProvider | None") -> None:
+        self._otel_tracer_provider = value
+
     async def close(self) -> None:
         """Close all initialized async clients.
 
@@ -150,6 +166,15 @@ class AsyncClientManager:
         if self._openai_client is not None:
             await self._openai_client.close()
             self._openai_client = None
+
+        if self._otel_tracer_provider is not None:
+            try:
+                self._otel_tracer_provider.force_flush()
+                self._otel_tracer_provider.shutdown()
+            except Exception as e:
+                logger.warning("Error shutting down OTEL TracerProvider: %s", e)
+            self._otel_tracer_provider = None
+            self._otel_instrumented = False
 
         if self._langfuse_client is not None:
             self._langfuse_client.flush()

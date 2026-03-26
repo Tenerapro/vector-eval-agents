@@ -2,14 +2,11 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
-
-from aieng.agent_evals.async_client_manager import AsyncClientManager
-from aieng.agent_evals.configs import TeneraRetrievalConfig
-from aieng.agent_evals.langfuse import init_tracing
+from aieng.agent_evals.configs import Configs, TeneraRetrievalConfig
 from aieng.agent_evals.retrieval import create_retriever
 from aieng.agent_evals.retrieval.tools import make_retrieval_tools
 from aieng.agent_evals.retrieval.types import AnswerCitation
+from pydantic import BaseModel, Field
 from google.adk.agents import LlmAgent
 from google.genai.types import GenerateContentConfig, HttpOptions, ThinkingConfig
 
@@ -34,27 +31,30 @@ def create_tenera_knowledge_bot_agent(
     name: str = "TeneraKnowledgeBot",
     *,
     instructions: str | None = None,
+    model: str | None = None,
+    temperature: float | None = None,
     retrieval_config: TeneraRetrievalConfig | None = None,
     timeout_sec: int | None = None,
-    enable_tracing: bool = True,
 ) -> LlmAgent:
-    """Create a retrieval-backed knowledge bot for the building-code corpus."""
-    client_manager = AsyncClientManager.get_instance()
-    resolved_config = retrieval_config or client_manager.configs.tenera_retrieval
+    """Create a retrieval-backed knowledge bot for the building-code corpus.
+
+    This intentionally keeps ``LlmAgent`` as the one non-parity exception to
+    ``knowledge_qa`` because Tenera relies on ADK structured output schema
+    enforcement for its JSON response.
+    """
+    config = Configs()  # type: ignore[call-arg]
+    resolved_config = retrieval_config or config.tenera_retrieval
     retriever, chunk_store = create_retriever(resolved_config)
     tools = make_retrieval_tools(retriever, chunk_store)
 
-    if enable_tracing:
-        init_tracing(service_name=name)
-
     return LlmAgent(
         name=name,
-        model=client_manager.configs.default_planner_model,
+        model=model or config.default_planner_model,
         instruction=instructions or KNOWLEDGE_BOT_PROMPT,
         tools=tools,
         generate_content_config=GenerateContentConfig(
             http_options=HttpOptions(timeout=timeout_sec * 1000) if timeout_sec is not None else None,
-            temperature=0.0,
+            temperature=config.default_temperature if temperature is None else temperature,
             thinking_config=ThinkingConfig(include_thoughts=True),
         ),
         output_schema=TeneraKnowledgeBotResponse,

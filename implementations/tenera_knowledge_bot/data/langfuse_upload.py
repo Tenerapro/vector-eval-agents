@@ -14,11 +14,13 @@ DEFAULT_EVALUATION_DATASET_PATH = "implementations/tenera_knowledge_bot/data/fl_
 DEFAULT_EVALUATION_DATASET_NAME = "TeneraKnowledgeBotEval"
 
 
-async def upload_csv_dataset(dataset_path: str, dataset_name: str) -> None:
+async def upload_csv_dataset(dataset_path: str, dataset_name: str, limit: int | None = None) -> None:
     """Convert the source CSV test set into Langfuse dataset rows and upload it."""
     source_path = Path(dataset_path)
     with source_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
+    if limit is not None:
+        rows = rows[:limit]
 
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".jsonl", delete=False) as temp_file:
         temp_path = Path(temp_file.name)
@@ -45,9 +47,15 @@ async def upload_csv_dataset(dataset_path: str, dataset_name: str) -> None:
 @click.command()
 @click.option("--dataset-path", default=DEFAULT_EVALUATION_DATASET_PATH, help="Path to the source CSV dataset.")
 @click.option("--dataset-name", default=DEFAULT_EVALUATION_DATASET_NAME, help="Name of the Langfuse dataset.")
-def cli(dataset_path: str, dataset_name: str) -> None:
+@click.option(
+    "--limit",
+    default=None,
+    type=int,
+    help="Optional limit for the number of CSV rows to upload from the top of the file.",
+)
+def cli(dataset_path: str, dataset_name: str, limit: int | None) -> None:
     """Upload the CSV-derived Tenera Knowledge Bot evaluation dataset."""
-    asyncio.run(upload_csv_dataset(dataset_path, dataset_name))
+    asyncio.run(upload_csv_dataset(dataset_path, dataset_name, limit=limit))
 
 
 if __name__ == "__main__":
